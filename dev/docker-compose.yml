@@ -1,0 +1,66 @@
+# Local single-node ZooKeeper for manual testing and for internal/zk's
+# Docker-based integration tests (internal/zk/integration_test.go, build tag
+# "integration"), which otherwise spin up their own throwaway container.
+# Same image (zookeeper:3.9) so behavior matches those tests.
+#
+# Three independent single-node ensembles on 2181/2182/2183 so the startup
+# context picker can be exercised against real, distinct clusters.
+#
+# Usage (from the repository root):
+#   docker compose -f dev/docker-compose.yml up -d --wait
+#   zklens --config <contexts>     # pick between local/staging/prod
+#   docker compose -f dev/docker-compose.yml down   # add -v to drop the data volumes
+name: zklens
+services:
+  zookeeper:
+    image: zookeeper:3.9
+    container_name: zklens-zookeeper
+    ports:
+      - "2181:2181"
+    volumes:
+      - zk-data:/data
+      - zk-datalog:/datalog
+    healthcheck:
+      test: ["CMD", "zkServer.sh", "status"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  zookeeper-staging:
+    image: zookeeper:3.9
+    container_name: zklens-zookeeper-staging
+    ports:
+      - "2182:2181"
+    volumes:
+      - zk-data-staging:/data
+      - zk-datalog-staging:/datalog
+    healthcheck:
+      test: ["CMD", "zkServer.sh", "status"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  zookeeper-prod:
+    image: zookeeper:3.9
+    container_name: zklens-zookeeper-prod
+    ports:
+      - "2183:2181"
+    volumes:
+      - zk-data-prod:/data
+      - zk-datalog-prod:/datalog
+    healthcheck:
+      test: ["CMD", "zkServer.sh", "status"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  zk-data:
+  zk-datalog:
+  zk-data-staging:
+  zk-datalog-staging:
+  zk-data-prod:
+  zk-datalog-prod:

@@ -1,0 +1,46 @@
+version: 2
+
+project_name: zklens
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: zklens
+    main: ./cmd/zklens
+    binary: zklens
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+
+archives:
+  - id: zklens
+    ids: [zklens]
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  github:
+    owner: hugantdev
+    name: zklens
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^test:"
+      - "^chore:"
