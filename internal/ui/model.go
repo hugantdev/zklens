@@ -581,21 +581,22 @@ func (m Model) refreshNode(n *node) (Model, tea.Cmd) {
 }
 
 // settleRefreshRead records the outcome of one current (non-stale) read that
-// may belong to the latest refresh. It returns true when the read is part of
-// that refresh and a failure was already recorded, in which case the caller
-// must keep the error in the status bar instead of announcing its success.
-func (m *Model) settleRefreshRead(tracked bool, failure string) (keepError bool) {
+// may belong to the latest refresh. It returns the refresh's stored failure
+// text, or "" if the read is not part of the refresh or nothing failed. A
+// tracked success must then re-show that text, because an unrelated read may
+// have overwritten the status bar since the failure was first displayed.
+func (m *Model) settleRefreshRead(tracked bool, failure string) string {
 	if !tracked {
-		return false
+		return ""
 	}
 	if failure != "" && m.refreshErr == "" {
 		m.refreshErr = failure
 	}
-	keepError = m.refreshErr != ""
+	stored := m.refreshErr
 	if m.refreshChildrenID == 0 && m.refreshDetailID == 0 {
 		m.refreshErr = ""
 	}
-	return keepError
+	return stored
 }
 
 // refreshDetailNode is 'r' in the Data and Stat panels: both show the same
@@ -710,12 +711,15 @@ func (m Model) handleData(msg dataMsg) Model {
 	if msg.err != nil {
 		failure = fmt.Sprintf("error reading %s: %v", msg.path, msg.err)
 	}
-	keepError := m.settleRefreshRead(tracked, failure)
+	stored := m.settleRefreshRead(tracked, failure)
 	switch {
 	case msg.err != nil:
 		m.status = failure
 		m.statusErr = true
-	case !keepError:
+	case stored != "":
+		m.status = stored
+		m.statusErr = true
+	default:
 		m.status = fmt.Sprintf("%s: %d bytes", msg.path, len(msg.data))
 		m.statusErr = false
 	}
@@ -1111,7 +1115,10 @@ func (m Model) handleChildren(msg childrenMsg) (Model, tea.Cmd) {
 	}
 
 	cmd := m.applyChildren(n, msg.children)
-	if !m.settleRefreshRead(tracked, "") {
+	if stored := m.settleRefreshRead(tracked, ""); stored != "" {
+		m.status = stored
+		m.statusErr = true
+	} else {
 		m.status = fmt.Sprintf("%s: %d children", msg.path, len(n.children))
 		m.statusErr = false
 	}

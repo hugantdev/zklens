@@ -303,3 +303,104 @@ func TestRefreshErrorDoesNotLeakIntoNextRefresh(t *testing.T) {
 		t.Fatalf("status = %q, stale error leaked into a clean refresh", cur.(Model).status)
 	}
 }
+
+// interleave refreshes /a (detail loaded) after starting an independent read
+// of /b (expanding it), then delivers the results in the given order. Each
+// step is "bOK", "bErr", "aChildrenOK", "aChildrenErr", "aDataOK", "aDataErr".
+func interleave(t *testing.T, steps ...string) Model {
+	t.Helper()
+	m, root, a := refreshFixture()
+	b := &node{path: "/b", name: "b", depth: 1, parent: root}
+	root.children = append(root.children, b)
+	m.nodes["/b"] = b
+	m.refreshItems()
+	m.detail = detailState{path: "/a", data: []byte("old"), stat: &zk.Stat{}}
+
+	m.selectNode(b)
+	var cur tea.Model = m
+	nm, _ := cur.Update(keyMsg("right")) // expand B: independent children read
+	cur = nm
+	bID := cur.(Model).childrenRequestIDs["/b"]
+	if bID == 0 {
+		t.Fatal("expanding /b did not start an independent children read")
+	}
+	cm := cur.(Model)
+	cm.selectNode(a)
+	nm, _ = cm.Update(keyMsg("r"))
+	cur = nm
+	aChildrenID := cur.(Model).childrenRequestIDs["/a"]
+	dataID := cur.(Model).detailRequestID
+
+	for _, step := range steps {
+		var msg tea.Msg
+		switch step {
+		case "bOK":
+			msg = childrenMsg{path: "/b", requestID: bID, children: []string{"k"}}
+		case "bErr":
+			msg = childrenMsg{path: "/b", requestID: bID, err: errors.New("b boom")}
+		case "aChildrenOK":
+			msg = childrenMsg{path: "/a", requestID: aChildrenID, children: []string{"x", "y"}}
+		case "aChildrenErr":
+			msg = childrenMsg{path: "/a", requestID: aChildrenID, err: errors.New("a list boom")}
+		case "aDataOK":
+			msg = dataMsg{path: "/a", requestID: dataID, data: []byte("new"), stat: &zk.Stat{}}
+		case "aDataErr":
+			msg = dataMsg{path: "/a", requestID: dataID, err: errors.New("a data boom")}
+		default:
+			t.Fatalf("unknown step %q", step)
+		}
+		cur, _ = cur.Update(msg)
+	}
+	return cur.(Model)
+}
+
+func TestRefreshErrorSurvivesIndependentSuccessBetweenTrackedReads(t *testing.T) {
+	um := interleave(t, "aDataErr", "bOK", "aChildrenOK")
+	if !um.statusErr || !strings.Contains(um.status, "a data boom") {
+		t.Fatalf("status = %q (err=%v), want the refresh's data error restored", um.status, um.statusErr)
+	}
+	if um.loadingCount != 0 || um.refreshErr != "" {
+		t.Fatalf("loadingCount=%d refreshErr=%q, want settled", um.loadingCount, um.refreshErr)
+	}
+}
+
+func TestRefreshErrorSurvivesIndependentSuccessInEveryPosition(t *testing.T) {
+	orders := [][]string{
+		{"bOK", "aDataErr", "aChildrenOK"},
+		{"aDataErr", "bOK", "aChildrenOK"},
+		{"aDataErr", "aChildrenOK", "bOK"}, // after settling: last message wins, see below
+		{"bOK", "aChildrenErr", "aDataOK"},
+		{"aChildrenErr", "bOK", "aDataOK"},
+		{"bErr", "aDataErr", "aChildrenOK"},
+		{"aDataErr", "bErr", "aChildrenOK"},
+		{"aChildrenErr", "bErr", "aDataOK"},
+	}
+	for _, steps := range orders {
+		um := interleave(t, steps...)
+		last := steps[len(steps)-1]
+		if last == "bOK" {
+			// The refresh had fully settled before the unrelated read ended;
+			// ordinary last-message-wins applies.
+			continue
+		}
+		if !um.statusErr || !(strings.Contains(um.status, "a data boom") || strings.Contains(um.status, "a list boom")) {
+			t.Errorf("%v: status = %q (err=%v), want the refresh error to be shown", steps, um.status, um.statusErr)
+		}
+		if um.loadingCount != 0 || um.refreshErr != "" {
+			t.Errorf("%v: loadingCount=%d refreshErr=%q, want settled", steps, um.loadingCount, um.refreshErr)
+		}
+	}
+}
+
+func TestRefreshCleanWithIndependentReadsShowsNoError(t *testing.T) {
+	for _, steps := range [][]string{
+		{"bOK", "aChildrenOK", "aDataOK"},
+		{"aChildrenOK", "bOK", "aDataOK"},
+		{"aDataOK", "bErr", "aChildrenOK"}, // independent error is overwritten by later tracked success: last wins
+	} {
+		um := interleave(t, steps...)
+		if um.statusErr {
+			t.Errorf("%v: status = %q flagged as error, want clean", steps, um.status)
+		}
+	}
+}
