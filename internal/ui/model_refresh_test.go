@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/bubbles/key"
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/hugantdev/zklens/internal/zk"
 )
@@ -113,7 +114,7 @@ func TestRefreshKeyOnTreeLeavesOtherNodesDetailAlone(t *testing.T) {
 	}
 }
 
-func TestRefreshKeyOnUnloadedCollapsedNodeDoesNothing(t *testing.T) {
+func TestRefreshKeyOnUnloadedCollapsedNodeFetchesChildrenWithoutExpanding(t *testing.T) {
 	root := &node{path: "/", name: "/", expanded: true, loaded: true}
 	b := &node{path: "/b", name: "b", depth: 1, parent: root}
 	root.children = []*node{b}
@@ -121,8 +122,19 @@ func TestRefreshKeyOnUnloadedCollapsedNodeDoesNothing(t *testing.T) {
 	m.selectNode(b)
 
 	newModel, cmd := m.Update(keyMsg("r"))
-	if cmd != nil || newModel.(Model).loadingCount != 0 {
-		t.Fatalf("cmd=%v loadingCount=%d, want a no-op", cmd, newModel.(Model).loadingCount)
+	nm := newModel.(Model)
+
+	if cmd == nil || nm.loadingCount != 1 || !b.loading {
+		t.Fatalf("cmd=%v loadingCount=%d loading=%v, want a children fetch", cmd, nm.loadingCount, b.loading)
+	}
+	if b.expanded {
+		t.Fatal("refresh must not expand the node")
+	}
+
+	updated, _ := nm.Update(childrenMsg{path: "/b", requestID: nm.childrenRequestIDs["/b"], children: []string{"c"}})
+	um := updated.(Model)
+	if !b.loaded || b.expanded || len(b.children) != 1 || um.loadingCount != 0 {
+		t.Fatalf("loaded=%v expanded=%v children=%v loadingCount=%d", b.loaded, b.expanded, childPaths(b), um.loadingCount)
 	}
 }
 
@@ -219,5 +231,75 @@ func TestRefreshBindingIsInHelp(t *testing.T) {
 	}
 	if !found {
 		t.Error("FullHelp lacks r/refresh")
+	}
+}
+
+// mixedRefresh starts a refresh of /a with its detail loaded, then delivers
+// the children and data results in the requested order.
+func mixedRefresh(t *testing.T, childrenErr, dataErr error, childrenFirst bool) Model {
+	t.Helper()
+	m, _, a := refreshFixture()
+	m.detail = detailState{path: "/a", data: []byte("old"), stat: &zk.Stat{}}
+	m.selectNode(a)
+	newModel, _ := m.Update(keyMsg("r"))
+	nm := newModel.(Model)
+
+	children := childrenMsg{path: "/a", requestID: nm.childrenRequestIDs["/a"], children: []string{"x", "y"}, err: childrenErr}
+	data := dataMsg{path: "/a", requestID: nm.detailRequestID, data: []byte("new"), stat: &zk.Stat{}, err: dataErr}
+	order := []interface{}{children, data}
+	if !childrenFirst {
+		order = []interface{}{data, children}
+	}
+	var cur tea.Model = nm
+	for _, msg := range order {
+		cur, _ = cur.Update(msg)
+	}
+	return cur.(Model)
+}
+
+func TestRefreshKeepsErrorAcrossBothCompletions(t *testing.T) {
+	cases := []struct {
+		name          string
+		childrenErr   error
+		dataErr       error
+		wantInStatus  string
+		childrenFirst bool
+	}{
+		{"children ok, data err, children first", nil, errors.New("data boom"), "data boom", true},
+		{"children ok, data err, data first", nil, errors.New("data boom"), "data boom", false},
+		{"children err, data ok, children first", errors.New("list boom"), nil, "list boom", true},
+		{"children err, data ok, data first", errors.New("list boom"), nil, "list boom", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			um := mixedRefresh(t, tc.childrenErr, tc.dataErr, tc.childrenFirst)
+			if !um.statusErr || !strings.Contains(um.status, tc.wantInStatus) {
+				t.Fatalf("status = %q (err=%v), want the %q error to stay", um.status, um.statusErr, tc.wantInStatus)
+			}
+			if um.loadingCount != 0 || um.refreshErr != "" {
+				t.Fatalf("loadingCount=%d refreshErr=%q, want settled and cleared", um.loadingCount, um.refreshErr)
+			}
+		})
+	}
+}
+
+func TestRefreshBothSucceedClearsError(t *testing.T) {
+	for _, first := range []bool{true, false} {
+		um := mixedRefresh(t, nil, nil, first)
+		if um.statusErr {
+			t.Fatalf("childrenFirst=%v: status = %q flagged as error", first, um.status)
+		}
+	}
+}
+
+func TestRefreshErrorDoesNotLeakIntoNextRefresh(t *testing.T) {
+	um := mixedRefresh(t, errors.New("list boom"), nil, true)
+	newModel, _ := um.Update(keyMsg("r"))
+	nm := newModel.(Model)
+	var cur tea.Model = nm
+	cur, _ = cur.Update(childrenMsg{path: "/a", requestID: nm.childrenRequestIDs["/a"], children: []string{"x"}})
+	cur, _ = cur.Update(dataMsg{path: "/a", requestID: nm.detailRequestID, data: []byte("n"), stat: &zk.Stat{}})
+	if cur.(Model).statusErr {
+		t.Fatalf("status = %q, stale error leaked into a clean refresh", cur.(Model).status)
 	}
 }

@@ -94,8 +94,15 @@ type Model struct {
 	// fresh Children result successfully reconciles it. The visible tree can
 	// therefore clear stale rows while applyChildren still has enough history
 	// to remove disappeared descendants from nodes.
-	invalidatedChildren   map[string][]*node
-	childrenRequestIDs    map[string]uint64
+	invalidatedChildren map[string][]*node
+	childrenRequestIDs  map[string]uint64
+	// refreshChildrenID and refreshDetailID are the request IDs of the reads
+	// started by the latest 'r' (0 once settled or none). refreshErr holds the
+	// first failure among them, so a later success cannot overwrite it in the
+	// status bar.
+	refreshChildrenID     uint64
+	refreshDetailID       uint64
+	refreshErr            string
 	nextChildrenRequestID uint64
 	childStatGenerations  map[string]uint64
 	nextChildStatGen      uint64
@@ -555,21 +562,40 @@ func (m Model) startDetailFetch(path string) (Model, tea.Cmd) {
 // current children in place until the new listing arrives, so a failed read
 // leaves the tree intact and only reports the error in the status bar.
 func (m Model) refreshNode(n *node) (Model, tea.Cmd) {
-	var cmds []tea.Cmd
-	if n.loaded || n.expanded {
-		cmds = append(cmds, m.startChildrenFetch(n))
-		m.refreshItems()
-	}
+	m.refreshChildrenID, m.refreshDetailID, m.refreshErr = 0, 0, ""
+
+	// Children are always re-read, even for a collapsed node that was never
+	// listed: the node is not expanded, only its listing is brought up to date.
+	cmds := []tea.Cmd{m.startChildrenFetch(n)}
+	m.refreshChildrenID = m.childrenRequestIDs[n.path]
+	m.refreshItems()
 	if m.detail.path == n.path {
 		var cmd tea.Cmd
 		m, cmd = m.startDetailFetch(n.path)
+		m.refreshDetailID = m.detailRequestID
 		cmds = append(cmds, cmd)
 	}
-	if len(cmds) > 0 {
-		m.status = "refreshing " + n.path
-		m.statusErr = false
-	}
+	m.status = "refreshing " + n.path
+	m.statusErr = false
 	return m, tea.Batch(cmds...)
+}
+
+// settleRefreshRead records the outcome of one current (non-stale) read that
+// may belong to the latest refresh. It returns true when the read is part of
+// that refresh and a failure was already recorded, in which case the caller
+// must keep the error in the status bar instead of announcing its success.
+func (m *Model) settleRefreshRead(tracked bool, failure string) (keepError bool) {
+	if !tracked {
+		return false
+	}
+	if failure != "" && m.refreshErr == "" {
+		m.refreshErr = failure
+	}
+	keepError = m.refreshErr != ""
+	if m.refreshChildrenID == 0 && m.refreshDetailID == 0 {
+		m.refreshErr = ""
+	}
+	return keepError
 }
 
 // refreshDetailNode is 'r' in the Data and Stat panels: both show the same
@@ -676,10 +702,20 @@ func (m Model) handleData(msg dataMsg) Model {
 	m.detail.stat = msg.stat
 	m.detail.err = msg.err
 
+	tracked := msg.requestID != 0 && msg.requestID == m.refreshDetailID
+	if tracked {
+		m.refreshDetailID = 0
+	}
+	failure := ""
 	if msg.err != nil {
-		m.status = fmt.Sprintf("error reading %s: %v", msg.path, msg.err)
+		failure = fmt.Sprintf("error reading %s: %v", msg.path, msg.err)
+	}
+	keepError := m.settleRefreshRead(tracked, failure)
+	switch {
+	case msg.err != nil:
+		m.status = failure
 		m.statusErr = true
-	} else {
+	case !keepError:
 		m.status = fmt.Sprintf("%s: %d bytes", msg.path, len(msg.data))
 		m.statusErr = false
 	}
@@ -1060,17 +1096,25 @@ func (m Model) handleChildren(msg childrenMsg) (Model, tea.Cmd) {
 		m.loadingCount--
 	}
 
+	tracked := msg.requestID != 0 && msg.requestID == m.refreshChildrenID
+	if tracked {
+		m.refreshChildrenID = 0
+	}
+
 	if msg.err != nil {
 		n.err = msg.err
 		m.status = fmt.Sprintf("error listing %s: %v", msg.path, msg.err)
 		m.statusErr = true
+		m.settleRefreshRead(tracked, m.status)
 		m.refreshItems()
 		return m, nil
 	}
 
 	cmd := m.applyChildren(n, msg.children)
-	m.status = fmt.Sprintf("%s: %d children", msg.path, len(n.children))
-	m.statusErr = false
+	if !m.settleRefreshRead(tracked, "") {
+		m.status = fmt.Sprintf("%s: %d children", msg.path, len(n.children))
+		m.statusErr = false
+	}
 	m.refreshItems()
 	return m, cmd
 }
