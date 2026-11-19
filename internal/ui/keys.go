@@ -21,11 +21,11 @@ func (k appKeyMap) ShortHelp() []key.Binding {
 	case k.mode == modeConfirmDelete:
 		return []key.Binding{keyConfirmYes, keyCancel}
 	case k.focus == focusData:
-		return []key.Binding{keyBack, keyEdit, keyWatch, keyFocusNext, keyHelp, keyQuit}
+		return []key.Binding{keyBack, keyEdit, keyWatch, keyRefresh, keyFocusNext, keyHelp, keyQuit}
 	case k.focus == focusStat:
-		return []key.Binding{keyBack, keyWatch, keyFocusNext, keyHelp, keyQuit}
+		return []key.Binding{keyBack, keyWatch, keyRefresh, keyFocusNext, keyHelp, keyQuit}
 	default:
-		return []key.Binding{keyToggle, keyDetail, keyCreate, keyEdit, keyDelete, keyFocusNext, keyHelp, keyQuit}
+		return []key.Binding{keyToggle, keyDetail, keyCreate, keyEdit, keyDelete, keyRefresh, keyFocusNext, keyHelp, keyQuit}
 	}
 }
 
@@ -35,7 +35,7 @@ func (k appKeyMap) FullHelp() [][]key.Binding {
 	}
 	return [][]key.Binding{
 		{keyToggle, keyExpand, keyCollapse},
-		{keyDetail, keyCreate, keyEdit, keyDelete, keyWatch},
+		{keyDetail, keyCreate, keyEdit, keyDelete, keyWatch, keyRefresh},
 		{keyFocusNext, keyBack, keyHelp, keyQuit},
 	}
 }

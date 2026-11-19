@@ -99,6 +99,7 @@ cursor.
 | **←** | Collapse, or jump to the parent if already collapsed |
 | **Tab** (on the tree) | Load the node's data and Stat into the right panels |
 | **Tab / Esc** (on a panel) | Return focus to the tree |
+| **r** | Refresh the selected node from ZooKeeper: its children and, if loaded, its data and Stat (works from the tree and from the Data/Stat panels) |
 | **Shift+Tab** | Cycle the focus: Tree → Data → Stat |
 | **?** | Expand or collapse the help bar |
 | **q** or **Ctrl+C** | Quit |

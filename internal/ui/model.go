@@ -36,6 +36,7 @@ var (
 	keyPrev       = key.NewBinding(key.WithKeys("left", "h", "up", "k"), key.WithHelp("←/↑", "previous"))
 	keyNext       = key.NewBinding(key.WithKeys("right", "l", "down", "j"), key.WithHelp("→/↓", "next"))
 	keyWatch      = key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "watch"))
+	keyRefresh    = key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh"))
 	keyFocusNext  = key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "switch panel"))
 	keyHelp       = key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help"))
 )
@@ -261,6 +262,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keyWatch):
 			if it, ok := m.list.SelectedItem().(treeItem); ok {
 				return m.toggleChildWatch(it.n)
+			}
+			return m, nil
+		case key.Matches(msg, keyRefresh):
+			if it, ok := m.list.SelectedItem().(treeItem); ok {
+				return m.refreshNode(it.n)
 			}
 			return m, nil
 		case key.Matches(msg, keyToggle):
@@ -543,6 +549,39 @@ func (m Model) startDetailFetch(path string) (Model, tea.Cmd) {
 	return m, fetchDataCmd(m.client, path, m.detailRequestID)
 }
 
+// refreshNode re-reads n from the ensemble: its children (when they have been
+// listed or are on screen) and, when n is the node shown in the Data/Stat
+// panels, its data and Stat. Unlike invalidateAndMaybeRefetch it keeps the
+// current children in place until the new listing arrives, so a failed read
+// leaves the tree intact and only reports the error in the status bar.
+func (m Model) refreshNode(n *node) (Model, tea.Cmd) {
+	var cmds []tea.Cmd
+	if n.loaded || n.expanded {
+		cmds = append(cmds, m.startChildrenFetch(n))
+		m.refreshItems()
+	}
+	if m.detail.path == n.path {
+		var cmd tea.Cmd
+		m, cmd = m.startDetailFetch(n.path)
+		cmds = append(cmds, cmd)
+	}
+	if len(cmds) > 0 {
+		m.status = "refreshing " + n.path
+		m.statusErr = false
+	}
+	return m, tea.Batch(cmds...)
+}
+
+// refreshDetailNode is 'r' in the Data and Stat panels: both show the same
+// znode, so it refreshes that node.
+func (m Model) refreshDetailNode() (Model, tea.Cmd) {
+	n, ok := m.nodes[m.detail.path]
+	if !ok {
+		return m, nil
+	}
+	return m.refreshNode(n)
+}
+
 // updateDataPanel routes a key press while the Datos panel has the focus.
 func (m Model) updateDataPanel(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
@@ -561,6 +600,8 @@ func (m Model) updateDataPanel(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.toggleDataWatch()
+	case key.Matches(msg, keyRefresh):
+		return m.refreshDetailNode()
 	}
 	var cmd tea.Cmd
 	m.dataVP, cmd = m.dataVP.Update(msg)
@@ -581,6 +622,8 @@ func (m Model) updateStatPanel(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.toggleDataWatch()
+	case key.Matches(msg, keyRefresh):
+		return m.refreshDetailNode()
 	}
 	var cmd tea.Cmd
 	m.statVP, cmd = m.statVP.Update(msg)
