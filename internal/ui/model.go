@@ -36,6 +36,7 @@ var (
 	keyPrev       = key.NewBinding(key.WithKeys("left", "h", "up", "k"), key.WithHelp("←/↑", "previous"))
 	keyNext       = key.NewBinding(key.WithKeys("right", "l", "down", "j"), key.WithHelp("→/↓", "next"))
 	keyWatch      = key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "watch"))
+	keyRefresh    = key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh"))
 	keyFocusNext  = key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "switch panel"))
 	keyHelp       = key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help"))
 )
@@ -93,8 +94,15 @@ type Model struct {
 	// fresh Children result successfully reconciles it. The visible tree can
 	// therefore clear stale rows while applyChildren still has enough history
 	// to remove disappeared descendants from nodes.
-	invalidatedChildren   map[string][]*node
-	childrenRequestIDs    map[string]uint64
+	invalidatedChildren map[string][]*node
+	childrenRequestIDs  map[string]uint64
+	// refreshChildrenID and refreshDetailID are the request IDs of the reads
+	// started by the latest 'r' (0 once settled or none). refreshErr holds the
+	// first failure among them, so a later success cannot overwrite it in the
+	// status bar.
+	refreshChildrenID     uint64
+	refreshDetailID       uint64
+	refreshErr            string
 	nextChildrenRequestID uint64
 	childStatGenerations  map[string]uint64
 	nextChildStatGen      uint64
@@ -261,6 +269,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keyWatch):
 			if it, ok := m.list.SelectedItem().(treeItem); ok {
 				return m.toggleChildWatch(it.n)
+			}
+			return m, nil
+		case key.Matches(msg, keyRefresh):
+			if it, ok := m.list.SelectedItem().(treeItem); ok {
+				return m.refreshNode(it.n)
 			}
 			return m, nil
 		case key.Matches(msg, keyToggle):
@@ -543,6 +556,59 @@ func (m Model) startDetailFetch(path string) (Model, tea.Cmd) {
 	return m, fetchDataCmd(m.client, path, m.detailRequestID)
 }
 
+// refreshNode re-reads n from the ensemble: its children (when they have been
+// listed or are on screen) and, when n is the node shown in the Data/Stat
+// panels, its data and Stat. Unlike invalidateAndMaybeRefetch it keeps the
+// current children in place until the new listing arrives, so a failed read
+// leaves the tree intact and only reports the error in the status bar.
+func (m Model) refreshNode(n *node) (Model, tea.Cmd) {
+	m.refreshChildrenID, m.refreshDetailID, m.refreshErr = 0, 0, ""
+
+	// Children are always re-read, even for a collapsed node that was never
+	// listed: the node is not expanded, only its listing is brought up to date.
+	cmds := []tea.Cmd{m.startChildrenFetch(n)}
+	m.refreshChildrenID = m.childrenRequestIDs[n.path]
+	m.refreshItems()
+	if m.detail.path == n.path {
+		var cmd tea.Cmd
+		m, cmd = m.startDetailFetch(n.path)
+		m.refreshDetailID = m.detailRequestID
+		cmds = append(cmds, cmd)
+	}
+	m.status = "refreshing " + n.path
+	m.statusErr = false
+	return m, tea.Batch(cmds...)
+}
+
+// settleRefreshRead records the outcome of one current (non-stale) read that
+// may belong to the latest refresh. It returns the refresh's stored failure
+// text, or "" if the read is not part of the refresh or nothing failed. A
+// tracked success must then re-show that text, because an unrelated read may
+// have overwritten the status bar since the failure was first displayed.
+func (m *Model) settleRefreshRead(tracked bool, failure string) string {
+	if !tracked {
+		return ""
+	}
+	if failure != "" && m.refreshErr == "" {
+		m.refreshErr = failure
+	}
+	stored := m.refreshErr
+	if m.refreshChildrenID == 0 && m.refreshDetailID == 0 {
+		m.refreshErr = ""
+	}
+	return stored
+}
+
+// refreshDetailNode is 'r' in the Data and Stat panels: both show the same
+// znode, so it refreshes that node.
+func (m Model) refreshDetailNode() (Model, tea.Cmd) {
+	n, ok := m.nodes[m.detail.path]
+	if !ok {
+		return m, nil
+	}
+	return m.refreshNode(n)
+}
+
 // updateDataPanel routes a key press while the Datos panel has the focus.
 func (m Model) updateDataPanel(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
@@ -561,6 +627,8 @@ func (m Model) updateDataPanel(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.toggleDataWatch()
+	case key.Matches(msg, keyRefresh):
+		return m.refreshDetailNode()
 	}
 	var cmd tea.Cmd
 	m.dataVP, cmd = m.dataVP.Update(msg)
@@ -581,6 +649,8 @@ func (m Model) updateStatPanel(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.toggleDataWatch()
+	case key.Matches(msg, keyRefresh):
+		return m.refreshDetailNode()
 	}
 	var cmd tea.Cmd
 	m.statVP, cmd = m.statVP.Update(msg)
@@ -633,10 +703,23 @@ func (m Model) handleData(msg dataMsg) Model {
 	m.detail.stat = msg.stat
 	m.detail.err = msg.err
 
+	tracked := msg.requestID != 0 && msg.requestID == m.refreshDetailID
+	if tracked {
+		m.refreshDetailID = 0
+	}
+	failure := ""
 	if msg.err != nil {
-		m.status = fmt.Sprintf("error reading %s: %v", msg.path, msg.err)
+		failure = fmt.Sprintf("error reading %s: %v", msg.path, msg.err)
+	}
+	stored := m.settleRefreshRead(tracked, failure)
+	switch {
+	case msg.err != nil:
+		m.status = failure
 		m.statusErr = true
-	} else {
+	case stored != "":
+		m.status = stored
+		m.statusErr = true
+	default:
 		m.status = fmt.Sprintf("%s: %d bytes", msg.path, len(msg.data))
 		m.statusErr = false
 	}
@@ -1017,17 +1100,28 @@ func (m Model) handleChildren(msg childrenMsg) (Model, tea.Cmd) {
 		m.loadingCount--
 	}
 
+	tracked := msg.requestID != 0 && msg.requestID == m.refreshChildrenID
+	if tracked {
+		m.refreshChildrenID = 0
+	}
+
 	if msg.err != nil {
 		n.err = msg.err
 		m.status = fmt.Sprintf("error listing %s: %v", msg.path, msg.err)
 		m.statusErr = true
+		m.settleRefreshRead(tracked, m.status)
 		m.refreshItems()
 		return m, nil
 	}
 
 	cmd := m.applyChildren(n, msg.children)
-	m.status = fmt.Sprintf("%s: %d children", msg.path, len(n.children))
-	m.statusErr = false
+	if stored := m.settleRefreshRead(tracked, ""); stored != "" {
+		m.status = stored
+		m.statusErr = true
+	} else {
+		m.status = fmt.Sprintf("%s: %d children", msg.path, len(n.children))
+		m.statusErr = false
+	}
 	m.refreshItems()
 	return m, cmd
 }
